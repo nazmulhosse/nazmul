@@ -70,6 +70,8 @@ jobs:
               "    id 'com.android.application'",
               "}",
               "",
+              "def ksFile = file('../release.keystore')",
+              "",
               "android {",
               "    namespace '%s'" % pkg,
               "    compileSdk 35",
@@ -82,12 +84,24 @@ jobs:
               "        versionName '%s'" % a['version_name'],
               "    }",
               "",
+              "    signingConfigs {",
+              "        if (ksFile.exists()) {",
+              "            release {",
+              "                storeFile ksFile",
+              "                storePassword System.getenv('KS_PASS')",
+              "                keyAlias System.getenv('KS_ALIAS')",
+              "                keyPassword System.getenv('KS_KEY_PASS')",
+              "            }",
+              "        }",
+              "    }",
+              "",
               "    buildTypes {",
               "        release {",
               "            minifyEnabled false",
-              "            signingConfig signingConfigs.debug",
+              "            signingConfig ksFile.exists() ? signingConfigs.release : signingConfigs.debug",
               "        }",
               "        debug {",
+              "            if (ksFile.exists()) { signingConfig signingConfigs.release }",
               "        }",
               "    }",
               "",
@@ -161,13 +175,14 @@ jobs:
           pm_map = {'camera':['CAMERA'],'location':['ACCESS_FINE_LOCATION','ACCESS_COARSE_LOCATION'],'storage':['READ_EXTERNAL_STORAGE','READ_MEDIA_IMAGES'],'mic':['RECORD_AUDIO','MODIFY_AUDIO_SETTINGS'],'notifications':['POST_NOTIFICATIONS']}
           for p in app.get('permissions', []): perms.extend(pm_map.get(p, []))
           pm_str = ''.join([f'<uses-permission android:name="android.permission.{p}"/>' for p in perms])
+          pm_str += '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>'
           rt_str = ','.join([f'"android.permission.{p}"' for p in perms])
           ori = {'auto':'unspecified','portrait':'portrait','landscape':'landscape'}.get(app.get('orientation', 'auto'), 'unspecified')
 
           icon_attr = '@mipmap/ic_launcher' if os.path.exists('app/src/main/res/mipmap-xxxhdpi/ic_launcher.png') else '@drawable/ic_launcher'
 
           with open('app/src/main/AndroidManifest.xml', 'w') as f:
-              f.write(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android">{pm_str}<application android:label="@string/app_name" android:icon="{icon_attr}" android:theme="@style/AppTheme" android:usesCleartextTraffic="true"><activity android:name=".MainActivity" android:exported="true" android:screenOrientation="{ori}" android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
+              f.write(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android">{pm_str}<application android:label="@string/app_name" android:icon="{icon_attr}" android:theme="@style/AppTheme" android:usesCleartextTraffic="true"><provider android:name="androidx.core.content.FileProvider" android:authorities="{pkg}.fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths"/></provider><activity android:name=".MainActivity" android:exported="true" android:screenOrientation="{ori}" android:windowSoftInputMode="adjustResize" android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
 
           # escape characters that break Android strings.xml (apostrophe, quotes, &, <, @, ?)
           nm = app["name"].replace("&", "&amp;").replace("<", "&lt;").replace("'", "\\'").replace('"', '\\"')
@@ -177,17 +192,29 @@ jobs:
           with open('app/src/main/res/values/themes.xml', 'w') as f:
               f.write(f'<resources><style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar"><item name="android:statusBarColor">{app["theme_color"]}</item><item name="android:navigationBarColor">{app.get("nav_color","#ffffff")}</item><item name="android:windowBackground">{app["splash_color"]}</item></style></resources>')
 
+          os.makedirs('app/src/main/res/xml', exist_ok=True)
+          with open('app/src/main/res/xml/file_paths.xml', 'w') as f:
+              f.write('<?xml version="1.0" encoding="utf-8"?><paths><cache-path name="updates" path="updates/"/></paths>')
+
+          # Where the app checks for updates (change this domain/folder if your update.php lives elsewhere)
+          UPDATE_DEFAULT = 'https://nazmul.page.gd/my_profile/update.php?pkg='
+          upd_url = app.get('update_url') or (UPDATE_DEFAULT + pkg)
+
           cs = app.get('custom', {})
           jstr = lambda s: json.dumps(s)
           java_code = """package @@PKG@@;
           import android.annotation.SuppressLint;import android.content.Intent;import android.graphics.Color;import android.net.Uri;import android.os.*;import android.view.*;import android.webkit.*;import android.widget.*;
           import androidx.appcompat.app.AppCompatActivity;import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+          import androidx.appcompat.app.AlertDialog;import androidx.core.content.FileProvider;import android.provider.Settings;import java.io.ByteArrayOutputStream;import java.io.File;import java.io.FileOutputStream;import java.io.InputStream;import java.net.HttpURLConnection;import java.net.URL;import org.json.JSONObject;
           public class MainActivity extends AppCompatActivity{
-           static final String START=@@START@@;static final String OFFLINE=@@OFF@@;static final String UA=@@UA@@;static final boolean EXT=@@EXT@@;
-           WebView web;WebView splash;SwipeRefreshLayout sw;TextView off;ValueCallback<Uri[]> cb;
+           static final String START=@@START@@;static final String OFFLINE=@@OFF@@;static final String UA=@@UA@@;static final boolean EXT=@@EXT@@;static final String UPD=@@UPD@@;
+           static final String T_TITLE=@@T_TITLE@@,T_MSG=@@T_MSG@@,T_BTN=@@T_BTN@@,T_LATER=@@T_LATER@@,T_DL=@@T_DL@@,T_ERR=@@T_ERR@@,T_PERM=@@T_PERM@@;
+           WebView web;WebView splash;SwipeRefreshLayout sw;TextView off;ValueCallback<Uri[]> cb;String pending;
            @SuppressLint("SetJavaScriptEnabled") @Override protected void onCreate(Bundle b){
             super.onCreate(b);
-            if(@@FULL@@)getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            if(@@FULL@@){getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,WindowManager.LayoutParams.FLAG_FULLSCREEN);
+             if(Build.VERSION.SDK_INT>=28){WindowManager.LayoutParams lp=getWindow().getAttributes();lp.layoutInDisplayCutoutMode=WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;getWindow().setAttributes(lp);}
+             getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE|View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN|View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);}
             FrameLayout root=new FrameLayout(this);sw=new SwipeRefreshLayout(this);web=new WebView(this);sw.addView(web);root.addView(sw);
             sw.setEnabled(@@PULL@@);sw.setOnRefreshListener(()->{off.setVisibility(View.GONE);web.reload();});sw.setOnChildScrollUpCallback((p,c)->web.getScrollY()>0);
             off=new TextView(this);off.setText(OFFLINE);off.setGravity(Gravity.CENTER);off.setPadding(60,60,60,60);off.setTextSize(17);off.setBackgroundColor(Color.WHITE);off.setTextColor(Color.DKGRAY);off.setVisibility(View.GONE);
@@ -212,9 +239,15 @@ jobs:
             });
             web.setDownloadListener((u,ua,cd,mt,l)->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(u)));}catch(Exception e){}});
             String[] P=new String[]{@@PERMS@@};if(Build.VERSION.SDK_INT>=23&&P.length>0)requestPermissions(P,2);
-            web.loadUrl(START);
+            web.loadUrl(START);checkUpdate();
             new Handler(Looper.getMainLooper()).postDelayed(()->splash.setVisibility(View.GONE),@@DUR@@);
            }
+           void checkUpdate(){if(UPD.length()==0)return;new Thread(()->{try{HttpURLConnection c=(HttpURLConnection)new URL(UPD).openConnection();c.setConnectTimeout(8000);c.setReadTimeout(8000);if(c.getResponseCode()!=200)return;InputStream in=c.getInputStream();ByteArrayOutputStream bo=new ByteArrayOutputStream();byte[] bf=new byte[4096];int n;while((n=in.read(bf))>0)bo.write(bf,0,n);in.close();JSONObject j=new JSONObject(bo.toString("UTF-8"));int cur=getPackageManager().getPackageInfo(getPackageName(),0).versionCode;if(j.optInt("versionCode",0)<=cur)return;final String ver=j.optString("versionName","");final String nt=j.optString("notes","");final String link=j.optString("url","");final boolean fc=j.optBoolean("force",false);if(link.length()==0)return;runOnUiThread(()->showUpdate(ver,nt,link,fc));}catch(Exception e){}}).start();}
+           void showUpdate(String ver,String nt,String link,boolean fc){AlertDialog.Builder bd=new AlertDialog.Builder(this).setTitle(T_TITLE+(ver.length()>0?" ("+ver+")":"")).setMessage(nt.length()>0?nt:T_MSG).setCancelable(!fc).setPositiveButton(T_BTN,(d,w)->startUpdate(link));if(!fc)bd.setNegativeButton(T_LATER,null);bd.show();}
+           void startUpdate(String link){if(Build.VERSION.SDK_INT>=26&&!getPackageManager().canRequestPackageInstalls()){pending=link;Toast.makeText(this,T_PERM,Toast.LENGTH_LONG).show();try{startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:"+getPackageName())));}catch(Exception e){}return;}
+            final AlertDialog dl=new AlertDialog.Builder(this).setTitle(T_DL).setMessage("0%").setCancelable(false).create();dl.show();
+            new Thread(()->{try{File dir=new File(getCacheDir(),"updates");dir.mkdirs();final File f=new File(dir,"update.apk");HttpURLConnection c=(HttpURLConnection)new URL(link).openConnection();c.setConnectTimeout(15000);c.setReadTimeout(30000);c.setInstanceFollowRedirects(true);c.connect();int len=c.getContentLength();InputStream in=c.getInputStream();FileOutputStream o=new FileOutputStream(f);byte[] bf=new byte[16384];int n;long t=0;int last=-1;while((n=in.read(bf))>0){o.write(bf,0,n);t+=n;if(len>0){final int p=(int)(t*100/len);if(p!=last){last=p;runOnUiThread(()->dl.setMessage(p+"%"));}}}o.close();in.close();runOnUiThread(()->{dl.dismiss();try{Uri u=FileProvider.getUriForFile(this,getPackageName()+".fileprovider",f);Intent i=new Intent(Intent.ACTION_VIEW);i.setDataAndType(u,"application/vnd.android.package-archive");i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_ACTIVITY_NEW_TASK);startActivity(i);}catch(Exception e){Toast.makeText(this,T_ERR,Toast.LENGTH_LONG).show();}});}catch(Exception e){runOnUiThread(()->{dl.dismiss();Toast.makeText(this,T_ERR,Toast.LENGTH_LONG).show();});}}).start();}
+           @Override protected void onResume(){super.onResume();if(pending!=null&&(Build.VERSION.SDK_INT<26||getPackageManager().canRequestPackageInstalls())){String pl=pending;pending=null;startUpdate(pl);}}
            @Override protected void onActivityResult(int rq,int rs,Intent d){if(rq==1&&cb!=null){cb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(rs,d));cb=null;}else super.onActivityResult(rq,rs,d);}
            @Override public void onBackPressed(){if(web.canGoBack())web.goBack();else super.onBackPressed();}
           }"""
@@ -226,6 +259,18 @@ jobs:
           java_code = java_code.replace('@@ZOOM@@', 'true' if cs.get('zoom') else 'false')
           java_code = java_code.replace('@@DUR@@', str(int(app['loader']['duration']) * 1000))
           java_code = java_code.replace('@@PERMS@@', rt_str)
+          java_code = java_code.replace('@@UPD@@', jstr(upd_url))
+          tx = {
+              'T_TITLE': 'নতুন আপডেট এসেছে',
+              'T_MSG': 'অ্যাপের নতুন সংস্করণ পাওয়া যাচ্ছে। এখনই আপডেট করুন।',
+              'T_BTN': 'আপডেট করুন',
+              'T_LATER': 'পরে',
+              'T_DL': 'ডাউনলোড হচ্ছে...',
+              'T_ERR': 'ডাউনলোড ব্যর্থ হয়েছে, আবার চেষ্টা করুন',
+              'T_PERM': 'ইনস্টলের অনুমতি দিন, তারপর ফিরে আসুন',
+          }
+          for k, v in tx.items():
+              java_code = java_code.replace('@@' + k + '@@', jstr(v))
 
           os.makedirs(f"app/src/main/java/{pkg.replace('.', '/')}", exist_ok=True)
           with open(f"app/src/main/java/{pkg.replace('.', '/')}/MainActivity.java", 'w') as f:
@@ -238,8 +283,24 @@ jobs:
         with:
           packages: 'platforms;android-35 build-tools;35.0.0'
 
+      - name: 6b. Preparing Signing Key
+        working-directory: workspace
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
+            echo "Permanent keystore found - signing with your own key"
+          else
+            echo "WARNING: KEYSTORE_BASE64 secret missing - using a temporary key (in-app updates will NOT install over older versions)"
+          fi
+
       - name: 7. Running Gradle Build
         working-directory: workspace
+        env:
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KS_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
         run: |
           echo "sdk.dir=$ANDROID_HOME" > local.properties
 
@@ -302,5 +363,3 @@ jobs:
           git rm -rf builds/${{ github.event.inputs.build_id }} || true
           git commit -m "Clean build #${{ github.event.inputs.build_id }}" || true
           git push || true
-
-
