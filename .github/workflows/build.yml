@@ -35,6 +35,7 @@ jobs:
           mkdir -p workspace
           cp builds/${{ github.event.inputs.build_id }}/config.json workspace/config.json || true
           cp builds/${{ github.event.inputs.build_id }}/icon.png workspace/icon.png || true
+          cp builds/${{ github.event.inputs.build_id }}/splash.png workspace/splash.png || true
 
           cd workspace
           mkdir -p app/src/main/assets
@@ -70,8 +71,6 @@ jobs:
               "    id 'com.android.application'",
               "}",
               "",
-              "def ksFile = file('../release.keystore')",
-              "",
               "android {",
               "    namespace '%s'" % pkg,
               "    compileSdk 35",
@@ -84,24 +83,12 @@ jobs:
               "        versionName '%s'" % a['version_name'],
               "    }",
               "",
-              "    signingConfigs {",
-              "        if (ksFile.exists()) {",
-              "            release {",
-              "                storeFile ksFile",
-              "                storePassword System.getenv('KS_PASS')",
-              "                keyAlias System.getenv('KS_ALIAS')",
-              "                keyPassword System.getenv('KS_KEY_PASS')",
-              "            }",
-              "        }",
-              "    }",
-              "",
               "    buildTypes {",
               "        release {",
               "            minifyEnabled false",
-              "            signingConfig ksFile.exists() ? signingConfigs.release : signingConfigs.debug",
+              "            signingConfig signingConfigs.debug",
               "        }",
               "        debug {",
-              "            if (ksFile.exists()) { signingConfig signingConfigs.release }",
               "        }",
               "    }",
               "",
@@ -134,33 +121,54 @@ jobs:
       - name: 4. Processing App Icon & Splash Screen
         working-directory: workspace
         run: |
-          pip install pillow -q || true
+          pip install pillow -q --break-system-packages || pip install pillow -q || true
           cat << 'EOF' > icon_splash.py
           import json, os, shutil
+          try:
+              from PIL import Image
+          except Exception:
+              Image = None
+
           with open('config.json') as f: cfg = json.load(f)
-          with open('app/src/main/assets/splash.html', 'w') as f:
+          assets = 'app/src/main/assets'
+          os.makedirs(assets, exist_ok=True)
+
+          # splash page (HTML) shown on app start
+          with open(assets + '/splash.html', 'w', encoding='utf-8') as f:
               f.write(cfg['app']['loader']['html'])
 
+          def save_png(src, dst, max_side):
+              ok = False
+              if Image:
+                  try:
+                      im = Image.open(src).convert('RGBA')
+                      im.thumbnail((max_side, max_side))
+                      im.save(dst, 'PNG')
+                      ok = True
+                  except Exception as e:
+                      print('Image convert failed:', src, e)
+              if not ok:
+                  shutil.copy(src, dst)
+
+          # ---- app (launcher) icon ----
           dst = 'app/src/main/res/mipmap-xxxhdpi/ic_launcher.png'
           if os.path.exists('icon.png'):
               os.makedirs('app/src/main/res/mipmap-xxxhdpi', exist_ok=True)
-              try:
-                  # re-save as a real PNG (uploaded file may be JPG/WebP renamed to .png)
-                  from PIL import Image
-                  im = Image.open('icon.png').convert('RGBA')
-                  im.thumbnail((512, 512))
-                  im.save(dst, 'PNG')
-              except Exception as e:
-                  print('Icon conversion failed, using default icon:', e)
-                  if os.path.exists(dst): os.remove(dst)
-
-          if not os.path.exists(dst):
+              save_png('icon.png', dst, 512)
+              # splash.html loads icon.png from assets
+              shutil.copy(dst, assets + '/icon.png')
+          else:
               os.makedirs('app/src/main/res/drawable', exist_ok=True)
               color = cfg['app'].get('theme_color', '#0d9488')
               with open('app/src/main/res/drawable/ic_launcher.xml', 'w') as f:
                   f.write('<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="' + color + '"/><corners android:radius="24dp"/></shape>')
+
+          # ---- optional splash image (splash.html loads splash_img.png from assets) ----
+          if os.path.exists('splash.png'):
+              save_png('splash.png', assets + '/splash_img.png', 1280)
           EOF
           python3 icon_splash.py
+          ls -la app/src/main/assets
 
       - name: 5. Configuring Android Permissions
         working-directory: workspace
@@ -175,14 +183,13 @@ jobs:
           pm_map = {'camera':['CAMERA'],'location':['ACCESS_FINE_LOCATION','ACCESS_COARSE_LOCATION'],'storage':['READ_EXTERNAL_STORAGE','READ_MEDIA_IMAGES'],'mic':['RECORD_AUDIO','MODIFY_AUDIO_SETTINGS'],'notifications':['POST_NOTIFICATIONS']}
           for p in app.get('permissions', []): perms.extend(pm_map.get(p, []))
           pm_str = ''.join([f'<uses-permission android:name="android.permission.{p}"/>' for p in perms])
-          pm_str += '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>'
           rt_str = ','.join([f'"android.permission.{p}"' for p in perms])
           ori = {'auto':'unspecified','portrait':'portrait','landscape':'landscape'}.get(app.get('orientation', 'auto'), 'unspecified')
 
           icon_attr = '@mipmap/ic_launcher' if os.path.exists('app/src/main/res/mipmap-xxxhdpi/ic_launcher.png') else '@drawable/ic_launcher'
 
           with open('app/src/main/AndroidManifest.xml', 'w') as f:
-              f.write(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android">{pm_str}<application android:label="@string/app_name" android:icon="{icon_attr}" android:theme="@style/AppTheme" android:usesCleartextTraffic="true"><provider android:name="androidx.core.content.FileProvider" android:authorities="{pkg}.fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths"/></provider><activity android:name=".MainActivity" android:exported="true" android:screenOrientation="{ori}" android:windowSoftInputMode="adjustResize" android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
+              f.write(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android">{pm_str}<application android:label="@string/app_name" android:icon="{icon_attr}" android:theme="@style/AppTheme" android:usesCleartextTraffic="true"><activity android:name=".MainActivity" android:exported="true" android:screenOrientation="{ori}" android:windowSoftInputMode="adjustResize" android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
 
           # escape characters that break Android strings.xml (apostrophe, quotes, &, <, @, ?)
           nm = app["name"].replace("&", "&amp;").replace("<", "&lt;").replace("'", "\\'").replace('"', '\\"')
@@ -192,24 +199,14 @@ jobs:
           with open('app/src/main/res/values/themes.xml', 'w') as f:
               f.write(f'<resources><style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar"><item name="android:statusBarColor">{app["theme_color"]}</item><item name="android:navigationBarColor">{app.get("nav_color","#ffffff")}</item><item name="android:windowBackground">{app["splash_color"]}</item></style></resources>')
 
-          os.makedirs('app/src/main/res/xml', exist_ok=True)
-          with open('app/src/main/res/xml/file_paths.xml', 'w') as f:
-              f.write('<?xml version="1.0" encoding="utf-8"?><paths><cache-path name="updates" path="updates/"/></paths>')
-
-          # Where the app checks for updates (change this domain/folder if your update.php lives elsewhere)
-          UPDATE_DEFAULT = 'https://nazmul.page.gd/my_profile/update.php?pkg='
-          upd_url = app.get('update_url') or (UPDATE_DEFAULT + pkg)
-
           cs = app.get('custom', {})
           jstr = lambda s: json.dumps(s)
           java_code = """package @@PKG@@;
           import android.annotation.SuppressLint;import android.content.Intent;import android.graphics.Color;import android.net.Uri;import android.os.*;import android.view.*;import android.webkit.*;import android.widget.*;
           import androidx.appcompat.app.AppCompatActivity;import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
-          import androidx.appcompat.app.AlertDialog;import androidx.core.content.FileProvider;import android.provider.Settings;import java.io.ByteArrayOutputStream;import java.io.File;import java.io.FileOutputStream;import java.io.InputStream;import java.net.HttpURLConnection;import java.net.URL;import org.json.JSONObject;
           public class MainActivity extends AppCompatActivity{
-           static final String START=@@START@@;static final String OFFLINE=@@OFF@@;static final String UA=@@UA@@;static final boolean EXT=@@EXT@@;static final String UPD=@@UPD@@;
-           static final String T_TITLE=@@T_TITLE@@,T_MSG=@@T_MSG@@,T_BTN=@@T_BTN@@,T_LATER=@@T_LATER@@,T_DL=@@T_DL@@,T_ERR=@@T_ERR@@,T_PERM=@@T_PERM@@;
-           WebView web;WebView splash;SwipeRefreshLayout sw;TextView off;ValueCallback<Uri[]> cb;String pending;
+           static final String START=@@START@@;static final String OFFLINE=@@OFF@@;static final String UA=@@UA@@;static final boolean EXT=@@EXT@@;
+           WebView web;WebView splash;SwipeRefreshLayout sw;TextView off;ValueCallback<Uri[]> cb;
            @SuppressLint("SetJavaScriptEnabled") @Override protected void onCreate(Bundle b){
             super.onCreate(b);
             if(@@FULL@@){getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,WindowManager.LayoutParams.FLAG_FULLSCREEN);
@@ -239,15 +236,9 @@ jobs:
             });
             web.setDownloadListener((u,ua,cd,mt,l)->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(u)));}catch(Exception e){}});
             String[] P=new String[]{@@PERMS@@};if(Build.VERSION.SDK_INT>=23&&P.length>0)requestPermissions(P,2);
-            web.loadUrl(START);checkUpdate();
+            web.loadUrl(START);
             new Handler(Looper.getMainLooper()).postDelayed(()->splash.setVisibility(View.GONE),@@DUR@@);
            }
-           void checkUpdate(){if(UPD.length()==0)return;new Thread(()->{try{HttpURLConnection c=(HttpURLConnection)new URL(UPD).openConnection();c.setConnectTimeout(8000);c.setReadTimeout(8000);if(c.getResponseCode()!=200)return;InputStream in=c.getInputStream();ByteArrayOutputStream bo=new ByteArrayOutputStream();byte[] bf=new byte[4096];int n;while((n=in.read(bf))>0)bo.write(bf,0,n);in.close();JSONObject j=new JSONObject(bo.toString("UTF-8"));int cur=getPackageManager().getPackageInfo(getPackageName(),0).versionCode;if(j.optInt("versionCode",0)<=cur)return;final String ver=j.optString("versionName","");final String nt=j.optString("notes","");final String link=j.optString("url","");final boolean fc=j.optBoolean("force",false);if(link.length()==0)return;runOnUiThread(()->showUpdate(ver,nt,link,fc));}catch(Exception e){}}).start();}
-           void showUpdate(String ver,String nt,String link,boolean fc){AlertDialog.Builder bd=new AlertDialog.Builder(this).setTitle(T_TITLE+(ver.length()>0?" ("+ver+")":"")).setMessage(nt.length()>0?nt:T_MSG).setCancelable(!fc).setPositiveButton(T_BTN,(d,w)->startUpdate(link));if(!fc)bd.setNegativeButton(T_LATER,null);bd.show();}
-           void startUpdate(String link){if(Build.VERSION.SDK_INT>=26&&!getPackageManager().canRequestPackageInstalls()){pending=link;Toast.makeText(this,T_PERM,Toast.LENGTH_LONG).show();try{startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:"+getPackageName())));}catch(Exception e){}return;}
-            final AlertDialog dl=new AlertDialog.Builder(this).setTitle(T_DL).setMessage("0%").setCancelable(false).create();dl.show();
-            new Thread(()->{try{File dir=new File(getCacheDir(),"updates");dir.mkdirs();final File f=new File(dir,"update.apk");HttpURLConnection c=(HttpURLConnection)new URL(link).openConnection();c.setConnectTimeout(15000);c.setReadTimeout(30000);c.setInstanceFollowRedirects(true);c.connect();int len=c.getContentLength();InputStream in=c.getInputStream();FileOutputStream o=new FileOutputStream(f);byte[] bf=new byte[16384];int n;long t=0;int last=-1;while((n=in.read(bf))>0){o.write(bf,0,n);t+=n;if(len>0){final int p=(int)(t*100/len);if(p!=last){last=p;runOnUiThread(()->dl.setMessage(p+"%"));}}}o.close();in.close();runOnUiThread(()->{dl.dismiss();try{Uri u=FileProvider.getUriForFile(this,getPackageName()+".fileprovider",f);Intent i=new Intent(Intent.ACTION_VIEW);i.setDataAndType(u,"application/vnd.android.package-archive");i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_ACTIVITY_NEW_TASK);startActivity(i);}catch(Exception e){Toast.makeText(this,T_ERR,Toast.LENGTH_LONG).show();}});}catch(Exception e){runOnUiThread(()->{dl.dismiss();Toast.makeText(this,T_ERR,Toast.LENGTH_LONG).show();});}}).start();}
-           @Override protected void onResume(){super.onResume();if(pending!=null&&(Build.VERSION.SDK_INT<26||getPackageManager().canRequestPackageInstalls())){String pl=pending;pending=null;startUpdate(pl);}}
            @Override protected void onActivityResult(int rq,int rs,Intent d){if(rq==1&&cb!=null){cb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(rs,d));cb=null;}else super.onActivityResult(rq,rs,d);}
            @Override public void onBackPressed(){if(web.canGoBack())web.goBack();else super.onBackPressed();}
           }"""
@@ -259,18 +250,6 @@ jobs:
           java_code = java_code.replace('@@ZOOM@@', 'true' if cs.get('zoom') else 'false')
           java_code = java_code.replace('@@DUR@@', str(int(app['loader']['duration']) * 1000))
           java_code = java_code.replace('@@PERMS@@', rt_str)
-          java_code = java_code.replace('@@UPD@@', jstr(upd_url))
-          tx = {
-              'T_TITLE': 'নতুন আপডেট এসেছে',
-              'T_MSG': 'অ্যাপের নতুন সংস্করণ পাওয়া যাচ্ছে। এখনই আপডেট করুন।',
-              'T_BTN': 'আপডেট করুন',
-              'T_LATER': 'পরে',
-              'T_DL': 'ডাউনলোড হচ্ছে...',
-              'T_ERR': 'ডাউনলোড ব্যর্থ হয়েছে, আবার চেষ্টা করুন',
-              'T_PERM': 'ইনস্টলের অনুমতি দিন, তারপর ফিরে আসুন',
-          }
-          for k, v in tx.items():
-              java_code = java_code.replace('@@' + k + '@@', jstr(v))
 
           os.makedirs(f"app/src/main/java/{pkg.replace('.', '/')}", exist_ok=True)
           with open(f"app/src/main/java/{pkg.replace('.', '/')}/MainActivity.java", 'w') as f:
@@ -283,24 +262,8 @@ jobs:
         with:
           packages: 'platforms;android-35 build-tools;35.0.0'
 
-      - name: 6b. Preparing Signing Key
-        working-directory: workspace
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        run: |
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > release.keystore
-            echo "Permanent keystore found - signing with your own key"
-          else
-            echo "WARNING: KEYSTORE_BASE64 secret missing - using a temporary key (in-app updates will NOT install over older versions)"
-          fi
-
       - name: 7. Running Gradle Build
         working-directory: workspace
-        env:
-          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
-          KS_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KS_KEY_PASS: ${{ secrets.KEY_PASSWORD }}
         run: |
           echo "sdk.dir=$ANDROID_HOME" > local.properties
 
