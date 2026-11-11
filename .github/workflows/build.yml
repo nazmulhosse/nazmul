@@ -35,6 +35,8 @@ jobs:
           cp builds/${{ github.event.inputs.build_id }}/icon.png workspace/icon.png || true
           
           cd workspace
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          
           cat << 'EOF' > generate_base.py
           import json, os, sys
           if not os.path.exists('config.json'):
@@ -110,8 +112,10 @@ jobs:
           rt_str = ','.join([f'"android.permission.{p}"' for p in perms])
           ori = {'auto':'unspecified','portrait':'portrait','landscape':'landscape'}.get(app.get('orientation', 'auto'), 'unspecified')
           
+          icon_attr = '@mipmap/ic_launcher' if os.path.exists('icon.png') else '@drawable/ic_launcher'
+          
           with open('app/src/main/AndroidManifest.xml', 'w') as f:
-              f.write(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android">{pm_str}<application android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:theme="@style/AppTheme" android:usesCleartextTraffic="true"><activity android:name=".MainActivity" android:exported="true" android:screenOrientation="{ori}" android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
+              f.write(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android">{pm_str}<application android:label="@string/app_name" android:icon="{icon_attr}" android:theme="@style/AppTheme" android:usesCleartextTraffic="true"><activity android:name=".MainActivity" android:exported="true" android:screenOrientation="{ori}" android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
           
           with open('app/src/main/res/values/strings.xml', 'w') as f:
               f.write(f'<resources><string name="app_name">{app["name"].replace("&", "&amp;").replace("<", "&lt;")}</string></resources>')
@@ -175,9 +179,8 @@ jobs:
           python3 gen_code.py
 
       - name: 6. Compiling Android Resources
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: 8.2
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || true
 
       - name: 7. Running Gradle Build
         working-directory: workspace
@@ -188,10 +191,10 @@ jobs:
           if [ "$B_MODE" = "release" ]; then TARGET="Release"; else TARGET="Debug"; fi
           
           if [ "${{ github.event.inputs.type }}" = "apk" ] || [ "${{ github.event.inputs.type }}" = "both" ]; then
-            ./gradlew assemble$TARGET --no-daemon
+            ./gradlew assemble$TARGET --no-daemon --stacktrace
           fi
           if [ "${{ github.event.inputs.type }}" = "aab" ] || [ "${{ github.event.inputs.type }}" = "both" ]; then
-            ./gradlew bundle$TARGET --no-daemon
+            ./gradlew bundle$TARGET --no-daemon --stacktrace
           fi
 
       - name: 8. Generating APK / AAB
@@ -207,7 +210,7 @@ jobs:
 
       - name: 10. Verifying Build Output
         run: |
-          if [ -z "$(ls -A dist)" ]; then
+          if [ -z "$(ls -A dist 2>/dev/null)" ]; then
             echo "Error: No APK or AAB files generated!"
             exit 1
           fi
@@ -222,7 +225,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cleanup Temporary Files
-        if: always()
+        if: success()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
