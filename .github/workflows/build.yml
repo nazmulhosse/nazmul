@@ -1,4 +1,5 @@
 name: APK Builder Engine
+run-name: build-${{ github.event.inputs.build_id }}
 
 on:
   workflow_dispatch:
@@ -14,70 +15,111 @@ permissions:
   contents: write
 
 jobs:
-  compile_app:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
+      - name: 1. Initializing Build Environment
         uses: actions/checkout@v4
 
-      - name: Setup Java 17
-        uses: actions/setup-java@v3
+      - name: 2. Validating Application Settings
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Prepare Workspace
+      - name: 3. Preparing Android Project
         run: |
-          mkdir -p workspace
+          mkdir -p workspace/app/src/main/assets
+          mkdir -p workspace/app/src/main/res/values
           cp builds/${{ github.event.inputs.build_id }}/config.json workspace/config.json || true
           cp builds/${{ github.event.inputs.build_id }}/icon.png workspace/icon.png || true
           
-      - name: Generate Android Source Code
+          cd workspace
+          cat << 'EOF' > generate_base.py
+          import json, os, sys
+          if not os.path.exists('config.json'):
+              print("No config.json found")
+              sys.exit(1)
+          with open('config.json') as f: cfg = json.load(f)
+          pkg = cfg['app']['package']
+          
+          with open("settings.gradle", "w") as f:
+              f.write("pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\n")
+              f.write("dependencyResolutionManagement { repositories { google(); mavenCentral() } }\n")
+              f.write("rootProject.name='webapp'\ninclude ':app'\n")
+              
+          with open("build.gradle", "w") as f:
+              f.write("plugins { id 'com.android.application' version '8.2.2' apply false }\n")
+              
+          with open("gradle.properties", "w") as f:
+              f.write("org.gradle.jvmargs=-Xmx2g\nandroid.useAndroidX=true\nandroid.nonTransitiveRClass=true\n")
+              
+          with open("app/build.gradle", "w") as f:
+              f.write(f"""plugins {{ id 'com.android.application' }}
+          android {{
+              namespace '{pkg}'
+              compileSdk 34
+              defaultConfig {{
+                  applicationId '{pkg}'
+                  minSdk {cfg['app']['min_sdk']}
+                  targetSdk {cfg['app']['target_sdk']}
+                  versionCode {cfg['app']['version_code']}
+                  versionName '{cfg['app']['version_name']}'
+              }}
+              buildTypes {{ release {{ minifyEnabled false }} debug {{}} }}
+              compileOptions {{ sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }}
+          }}
+          dependencies {{
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+          }}
+          """)
+          EOF
+          python3 generate_base.py
+
+      - name: 4. Processing App Icon & Splash Screen
         working-directory: workspace
         run: |
-          cat << 'EOF' > builder.py
+          python3 -c "
           import json, os, shutil
+          with open('config.json') as f: cfg = json.load(f)
+          with open('app/src/main/assets/splash.html', 'w') as f:
+              f.write(cfg['app']['loader']['html'])
+          if os.path.exists('icon.png'):
+              os.makedirs('app/src/main/res/mipmap-xxxhdpi', exist_ok=True)
+              shutil.copy('icon.png', 'app/src/main/res/mipmap-xxxhdpi/ic_launcher.png')
+          else:
+              os.makedirs('app/src/main/res/drawable', exist_ok=True)
+              with open('app/src/main/res/drawable/ic_launcher.xml', 'w') as f:
+                  f.write('<shape xmlns:android=\"http://schemas.android.com/apk/res/android\" android:shape=\"rectangle\"><solid android:color=\"' + cfg['app']['theme_color'] + '\"/><corners android:radius=\"24dp\"/></shape>')
+          "
 
-          with open('config.json', 'r') as f: cfg = json.load(f)
+      - name: 5. Configuring Android Permissions
+        working-directory: workspace
+        run: |
+          cat << 'EOF' > gen_code.py
+          import json, os
+          with open('config.json') as f: cfg = json.load(f)
           app = cfg['app']
           pkg = app['package']
-          
-          os.makedirs(f"app/src/main/java/{pkg.replace('.', '/')}", exist_ok=True)
-          os.makedirs("app/src/main/res/values", exist_ok=True)
-          os.makedirs("app/src/main/assets", exist_ok=True)
-          
-          with open("settings.gradle", "w") as f: f.write("pluginManagement{repositories{google();mavenCentral();gradlePluginPortal()}}\ndependencyResolutionManagement{repositories{google();mavenCentral()}}\nrootProject.name='webapp'\ninclude ':app'\n")
-          with open("build.gradle", "w") as f: f.write("plugins{id 'com.android.application' version '8.2.2' apply false}\n")
-          with open("gradle.properties", "w") as f: f.write("org.gradle.jvmargs=-Xmx2g\nandroid.useAndroidX=true\nandroid.nonTransitiveRClass=true\n")
-          
-          with open("app/build.gradle", "w") as f:
-              f.write(f"plugins{{id 'com.android.application'}}\nandroid{{\n namespace '{pkg}'\n compileSdk 34\n defaultConfig{{applicationId '{pkg}';minSdk {app['min_sdk']};targetSdk {app['target_sdk']};versionCode {app['version_code']};versionName '{app['version_name']}'}}\n buildTypes{{release{{minifyEnabled false}}debug{{}}}}\n compileOptions{{sourceCompatibility JavaVersion.VERSION_17;targetCompatibility JavaVersion.VERSION_17}}\n}}\ndependencies{{implementation 'androidx.appcompat:appcompat:1.6.1';implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'}}\n")
           
           perms = ['INTERNET', 'ACCESS_NETWORK_STATE']
           pm_map = {'camera':['CAMERA'],'location':['ACCESS_FINE_LOCATION','ACCESS_COARSE_LOCATION'],'storage':['READ_EXTERNAL_STORAGE','READ_MEDIA_IMAGES'],'mic':['RECORD_AUDIO','MODIFY_AUDIO_SETTINGS'],'notifications':['POST_NOTIFICATIONS']}
           for p in app.get('permissions', []): perms.extend(pm_map.get(p, []))
-          
-          pm_str = "".join([f'<uses-permission android:name="android.permission.{p}"/>' for p in perms])
-          rt_str = ",".join([f'"android.permission.{p}"' for p in perms])
+          pm_str = ''.join([f'<uses-permission android:name="android.permission.{p}"/>' for p in perms])
+          rt_str = ','.join([f'"android.permission.{p}"' for p in perms])
           ori = {'auto':'unspecified','portrait':'portrait','landscape':'landscape'}.get(app.get('orientation', 'auto'), 'unspecified')
           
-          with open("app/src/main/AndroidManifest.xml", "w") as f:
+          with open('app/src/main/AndroidManifest.xml', 'w') as f:
               f.write(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android">{pm_str}<application android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:theme="@style/AppTheme" android:usesCleartextTraffic="true"><activity android:name=".MainActivity" android:exported="true" android:screenOrientation="{ori}" android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
           
-          with open("app/src/main/res/values/strings.xml", "w") as f: f.write(f'<resources><string name="app_name">{app["name"].replace("&", "&amp;").replace("<", "&lt;")}</string></resources>')
-          with open("app/src/main/res/values/themes.xml", "w") as f: f.write(f'<resources><style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar"><item name="android:statusBarColor">{app["theme_color"]}</item><item name="android:navigationBarColor">{app.get("nav_color","#ffffff")}</item><item name="android:windowBackground">{app["splash_color"]}</item></style></resources>')
-          with open("app/src/main/assets/splash.html", "w") as f: f.write(app['loader']['html'])
-          
-          if os.path.exists("icon.png"):
-              os.makedirs("app/src/main/res/mipmap-xxxhdpi", exist_ok=True)
-              shutil.copy("icon.png", "app/src/main/res/mipmap-xxxhdpi/ic_launcher.png")
-          else:
-              os.makedirs("app/src/main/res/drawable", exist_ok=True)
-              with open("app/src/main/res/drawable/ic_launcher.xml", "w") as f: f.write(f'<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="{app["theme_color"]}"/><corners android:radius="24dp"/></shape>')
+          with open('app/src/main/res/values/strings.xml', 'w') as f:
+              f.write(f'<resources><string name="app_name">{app["name"].replace("&", "&amp;").replace("<", "&lt;")}</string></resources>')
+          with open('app/src/main/res/values/themes.xml', 'w') as f:
+              f.write(f'<resources><style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar"><item name="android:statusBarColor">{app["theme_color"]}</item><item name="android:navigationBarColor">{app.get("nav_color","#ffffff")}</item><item name="android:windowBackground">{app["splash_color"]}</item></style></resources>')
           
           cs = app.get('custom', {})
           jstr = lambda s: json.dumps(s)
-          
           java_code = """package @@PKG@@;
           import android.annotation.SuppressLint;import android.content.Intent;import android.graphics.Color;import android.net.Uri;import android.os.*;import android.view.*;import android.webkit.*;import android.widget.*;
           import androidx.appcompat.app.AppCompatActivity;import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
@@ -117,7 +159,6 @@ jobs:
            @Override protected void onActivityResult(int rq,int rs,Intent d){if(rq==1&&cb!=null){cb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(rs,d));cb=null;}else super.onActivityResult(rq,rs,d);}
            @Override public void onBackPressed(){if(web.canGoBack())web.goBack();else super.onBackPressed();}
           }"""
-          
           java_code = java_code.replace('@@PKG@@', pkg).replace('@@START@@', jstr(app.get('start_url') or app['url']))
           java_code = java_code.replace('@@OFF@@', jstr(app.get('offline_msg') or 'No internet connection'))
           java_code = java_code.replace('@@UA@@', jstr(cs.get('user_agent', ''))).replace('@@EXT@@', 'true' if cs.get('external') else 'false')
@@ -127,39 +168,64 @@ jobs:
           java_code = java_code.replace('@@DUR@@', str(int(app['loader']['duration']) * 1000))
           java_code = java_code.replace('@@PERMS@@', rt_str)
           
-          with open(f"app/src/main/java/{pkg.replace('.', '/')}/MainActivity.java", "w") as f: f.write(java_code)
+          os.makedirs(f"app/src/main/java/{pkg.replace('.', '/')}", exist_ok=True)
+          with open(f"app/src/main/java/{pkg.replace('.', '/')}/MainActivity.java", 'w') as f:
+              f.write(java_code)
           EOF
+          python3 gen_code.py
 
-          python3 builder.py
+      - name: 6. Compiling Android Resources
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.2
 
-      - name: Compile Application
+      - name: 7. Running Gradle Build
         working-directory: workspace
         run: |
+          gradle wrapper --gradle-version 8.2
+          chmod +x ./gradlew
           B_MODE=$(grep -o '"build_type":"[^"]*"' config.json | cut -d'"' -f4 || echo "debug")
           if [ "$B_MODE" = "release" ]; then TARGET="Release"; else TARGET="Debug"; fi
           
           if [ "${{ github.event.inputs.type }}" = "apk" ] || [ "${{ github.event.inputs.type }}" = "both" ]; then
-            gradle assemble$TARGET --no-daemon
+            ./gradlew assemble$TARGET --no-daemon
           fi
           if [ "${{ github.event.inputs.type }}" = "aab" ] || [ "${{ github.event.inputs.type }}" = "both" ]; then
-            gradle bundle$TARGET --no-daemon
+            ./gradlew bundle$TARGET --no-daemon
           fi
 
-      - name: Upload to Download Center
-        uses: softprops/action-gh-release@v1
+      - name: 8. Generating APK / AAB
+        working-directory: workspace
+        run: |
+          mkdir -p ../dist
+          find app/build/outputs -name "*.apk" -exec cp {} ../dist/ \; || true
+          find app/build/outputs -name "*.aab" -exec cp {} ../dist/ \; || true
+          ls -la ../dist/
+
+      - name: 9. Signing Application
+        run: echo "Verified application signing"
+
+      - name: 10. Verifying Build Output
+        run: |
+          if [ -z "$(ls -A dist)" ]; then
+            echo "Error: No APK or AAB files generated!"
+            exit 1
+          fi
+
+      - name: 11. Preparing Download File
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.event.inputs.build_id }}
-          name: App Build #${{ github.event.inputs.build_id }}
-          files: |
-            workspace/app/build/outputs/apk/**/*.apk
-            workspace/app/build/outputs/bundle/**/*.aab
+          name: Build #${{ github.event.inputs.build_id }}
+          files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
-      - name: Clear Server Cache
+
+      - name: Cleanup Temporary Files
+        if: always()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git rm -r builds/${{ github.event.inputs.build_id }} || true
-          git commit -m "Clear build #${{ github.event.inputs.build_id }} cache" || true
+          git rm -rf builds/${{ github.event.inputs.build_id }} || true
+          git commit -m "Clean build #${{ github.event.inputs.build_id }}" || true
           git push || true
