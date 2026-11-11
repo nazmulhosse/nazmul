@@ -1,0 +1,165 @@
+name: APK Builder Engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: 'Build ID'
+        required: true
+      type:
+        description: 'Build Format'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  compile_app:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Prepare Workspace
+        run: |
+          mkdir -p workspace
+          cp builds/${{ github.event.inputs.build_id }}/config.json workspace/config.json || true
+          cp builds/${{ github.event.inputs.build_id }}/icon.png workspace/icon.png || true
+          
+      - name: Generate Android Source Code
+        working-directory: workspace
+        run: |
+          cat << 'EOF' > builder.py
+          import json, os, shutil
+
+          with open('config.json', 'r') as f: cfg = json.load(f)
+          app = cfg['app']
+          pkg = app['package']
+          
+          os.makedirs(f"app/src/main/java/{pkg.replace('.', '/')}", exist_ok=True)
+          os.makedirs("app/src/main/res/values", exist_ok=True)
+          os.makedirs("app/src/main/assets", exist_ok=True)
+          
+          with open("settings.gradle", "w") as f: f.write("pluginManagement{repositories{google();mavenCentral();gradlePluginPortal()}}\ndependencyResolutionManagement{repositories{google();mavenCentral()}}\nrootProject.name='webapp'\ninclude ':app'\n")
+          with open("build.gradle", "w") as f: f.write("plugins{id 'com.android.application' version '8.2.2' apply false}\n")
+          with open("gradle.properties", "w") as f: f.write("org.gradle.jvmargs=-Xmx2g\nandroid.useAndroidX=true\nandroid.nonTransitiveRClass=true\n")
+          
+          with open("app/build.gradle", "w") as f:
+              f.write(f"plugins{{id 'com.android.application'}}\nandroid{{\n namespace '{pkg}'\n compileSdk 34\n defaultConfig{{applicationId '{pkg}';minSdk {app['min_sdk']};targetSdk {app['target_sdk']};versionCode {app['version_code']};versionName '{app['version_name']}'}}\n buildTypes{{release{{minifyEnabled false}}debug{{}}}}\n compileOptions{{sourceCompatibility JavaVersion.VERSION_17;targetCompatibility JavaVersion.VERSION_17}}\n}}\ndependencies{{implementation 'androidx.appcompat:appcompat:1.6.1';implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'}}\n")
+          
+          perms = ['INTERNET', 'ACCESS_NETWORK_STATE']
+          pm_map = {'camera':['CAMERA'],'location':['ACCESS_FINE_LOCATION','ACCESS_COARSE_LOCATION'],'storage':['READ_EXTERNAL_STORAGE','READ_MEDIA_IMAGES'],'mic':['RECORD_AUDIO','MODIFY_AUDIO_SETTINGS'],'notifications':['POST_NOTIFICATIONS']}
+          for p in app.get('permissions', []): perms.extend(pm_map.get(p, []))
+          
+          pm_str = "".join([f'<uses-permission android:name="android.permission.{p}"/>' for p in perms])
+          rt_str = ",".join([f'"android.permission.{p}"' for p in perms])
+          ori = {'auto':'unspecified','portrait':'portrait','landscape':'landscape'}.get(app.get('orientation', 'auto'), 'unspecified')
+          
+          with open("app/src/main/AndroidManifest.xml", "w") as f:
+              f.write(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android">{pm_str}<application android:label="@string/app_name" android:icon="@mipmap/ic_launcher" android:theme="@style/AppTheme" android:usesCleartextTraffic="true"><activity android:name=".MainActivity" android:exported="true" android:screenOrientation="{ori}" android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
+          
+          with open("app/src/main/res/values/strings.xml", "w") as f: f.write(f'<resources><string name="app_name">{app["name"].replace("&", "&amp;").replace("<", "&lt;")}</string></resources>')
+          with open("app/src/main/res/values/themes.xml", "w") as f: f.write(f'<resources><style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar"><item name="android:statusBarColor">{app["theme_color"]}</item><item name="android:navigationBarColor">{app.get("nav_color","#ffffff")}</item><item name="android:windowBackground">{app["splash_color"]}</item></style></resources>')
+          with open("app/src/main/assets/splash.html", "w") as f: f.write(app['loader']['html'])
+          
+          if os.path.exists("icon.png"):
+              os.makedirs("app/src/main/res/mipmap-xxxhdpi", exist_ok=True)
+              shutil.copy("icon.png", "app/src/main/res/mipmap-xxxhdpi/ic_launcher.png")
+          else:
+              os.makedirs("app/src/main/res/drawable", exist_ok=True)
+              with open("app/src/main/res/drawable/ic_launcher.xml", "w") as f: f.write(f'<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="{app["theme_color"]}"/><corners android:radius="24dp"/></shape>')
+          
+          cs = app.get('custom', {})
+          jstr = lambda s: json.dumps(s)
+          
+          java_code = """package @@PKG@@;
+          import android.annotation.SuppressLint;import android.content.Intent;import android.graphics.Color;import android.net.Uri;import android.os.*;import android.view.*;import android.webkit.*;import android.widget.*;
+          import androidx.appcompat.app.AppCompatActivity;import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+          public class MainActivity extends AppCompatActivity{
+           static final String START=@@START@@;static final String OFFLINE=@@OFF@@;static final String UA=@@UA@@;static final boolean EXT=@@EXT@@;
+           WebView web;WebView splash;SwipeRefreshLayout sw;TextView off;ValueCallback<Uri[]> cb;
+           @SuppressLint("SetJavaScriptEnabled") @Override protected void onCreate(Bundle b){
+            super.onCreate(b);
+            if(@@FULL@@)getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            FrameLayout root=new FrameLayout(this);sw=new SwipeRefreshLayout(this);web=new WebView(this);sw.addView(web);root.addView(sw);
+            sw.setEnabled(@@PULL@@);sw.setOnRefreshListener(()->{off.setVisibility(View.GONE);web.reload();});sw.setOnChildScrollUpCallback((p,c)->web.getScrollY()>0);
+            off=new TextView(this);off.setText(OFFLINE);off.setGravity(Gravity.CENTER);off.setPadding(60,60,60,60);off.setTextSize(17);off.setBackgroundColor(Color.WHITE);off.setTextColor(Color.DKGRAY);off.setVisibility(View.GONE);
+            off.setOnClickListener(v->{off.setVisibility(View.GONE);web.reload();});root.addView(off);
+            splash=new WebView(this);splash.getSettings().setJavaScriptEnabled(false);splash.setBackgroundColor(Color.TRANSPARENT);splash.loadUrl("file:///android_asset/splash.html");root.addView(splash);
+            setContentView(root);
+            WebSettings s=web.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);s.setMediaPlaybackRequiresUserGesture(false);s.setGeolocationEnabled(true);s.setAllowFileAccess(false);
+            if(UA.length()>0)s.setUserAgentString(s.getUserAgentString()+" "+UA);
+            if(@@ZOOM@@){s.setSupportZoom(true);s.setBuiltInZoomControls(true);s.setDisplayZoomControls(false);}
+            CookieManager.getInstance().setAcceptCookie(true);CookieManager.getInstance().setAcceptThirdPartyCookies(web,true);
+            web.setWebViewClient(new WebViewClient(){
+             @Override public boolean shouldOverrideUrlLoading(WebView v,WebResourceRequest r){Uri u=r.getUrl();String sc=u.getScheme()==null?"":u.getScheme();
+              if(sc.equals("http")||sc.equals("https")){if(EXT&&u.getHost()!=null&&!u.getHost().equals(Uri.parse(START).getHost())){try{startActivity(new Intent(Intent.ACTION_VIEW,u));}catch(Exception e){}return true;}return false;}
+              try{startActivity(new Intent(Intent.ACTION_VIEW,u));}catch(Exception e){}return true;}
+             @Override public void onPageFinished(WebView v,String u){sw.setRefreshing(false);}
+             @Override public void onReceivedError(WebView v,WebResourceRequest r,WebResourceError e){if(r.isForMainFrame()){sw.setRefreshing(false);off.setVisibility(View.VISIBLE);}}
+            });
+            web.setWebChromeClient(new WebChromeClient(){
+             @Override public boolean onShowFileChooser(WebView v,ValueCallback<Uri[]> c,FileChooserParams p){if(cb!=null)cb.onReceiveValue(null);cb=c;try{startActivityForResult(p.createIntent(),1);}catch(Exception e){cb=null;return false;}return true;}
+             @Override public void onGeolocationPermissionsShowPrompt(String o,GeolocationPermissions.Callback c){c.invoke(o,true,false);}
+             @Override public void onPermissionRequest(PermissionRequest r){runOnUiThread(()->r.grant(r.getResources()));}
+            });
+            web.setDownloadListener((u,ua,cd,mt,l)->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(u)));}catch(Exception e){}});
+            String[] P=new String[]{@@PERMS@@};if(Build.VERSION.SDK_INT>=23&&P.length>0)requestPermissions(P,2);
+            web.loadUrl(START);
+            new Handler(Looper.getMainLooper()).postDelayed(()->splash.setVisibility(View.GONE),@@DUR@@);
+           }
+           @Override protected void onActivityResult(int rq,int rs,Intent d){if(rq==1&&cb!=null){cb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(rs,d));cb=null;}else super.onActivityResult(rq,rs,d);}
+           @Override public void onBackPressed(){if(web.canGoBack())web.goBack();else super.onBackPressed();}
+          }"""
+          
+          java_code = java_code.replace('@@PKG@@', pkg).replace('@@START@@', jstr(app.get('start_url') or app['url']))
+          java_code = java_code.replace('@@OFF@@', jstr(app.get('offline_msg') or 'No internet connection'))
+          java_code = java_code.replace('@@UA@@', jstr(cs.get('user_agent', ''))).replace('@@EXT@@', 'true' if cs.get('external') else 'false')
+          java_code = java_code.replace('@@FULL@@', 'true' if app.get('fullscreen') else 'false')
+          java_code = java_code.replace('@@PULL@@', 'true' if app.get('pull_refresh') else 'false')
+          java_code = java_code.replace('@@ZOOM@@', 'true' if cs.get('zoom') else 'false')
+          java_code = java_code.replace('@@DUR@@', str(int(app['loader']['duration']) * 1000))
+          java_code = java_code.replace('@@PERMS@@', rt_str)
+          
+          with open(f"app/src/main/java/{pkg.replace('.', '/')}/MainActivity.java", "w") as f: f.write(java_code)
+          EOF
+
+          python3 builder.py
+
+      - name: Compile Application
+        working-directory: workspace
+        run: |
+          B_MODE=$(grep -o '"build_type":"[^"]*"' config.json | cut -d'"' -f4 || echo "debug")
+          if [ "$B_MODE" = "release" ]; then TARGET="Release"; else TARGET="Debug"; fi
+          
+          if [ "${{ github.event.inputs.type }}" = "apk" ] || [ "${{ github.event.inputs.type }}" = "both" ]; then
+            gradle assemble$TARGET --no-daemon
+          fi
+          if [ "${{ github.event.inputs.type }}" = "aab" ] || [ "${{ github.event.inputs.type }}" = "both" ]; then
+            gradle bundle$TARGET --no-daemon
+          fi
+
+      - name: Upload to Download Center
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: build-${{ github.event.inputs.build_id }}
+          name: App Build #${{ github.event.inputs.build_id }}
+          files: |
+            workspace/app/build/outputs/apk/**/*.apk
+            workspace/app/build/outputs/bundle/**/*.aab
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Clear Server Cache
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git rm -r builds/${{ github.event.inputs.build_id }} || true
+          git commit -m "Clear build #${{ github.event.inputs.build_id }} cache" || true
+          git push || true
