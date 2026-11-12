@@ -50,7 +50,7 @@ jobs:
           a = cfg['app']
           pkg = a['package']
           min_sdk = max(21, int(a.get('min_sdk', 21)))
-          target_sdk = int(a.get('target_sdk', 34))
+          target_sdk = max(36, int(a.get('target_sdk', 36)))   # Google Play requires API 36+
 
           with open("settings.gradle", "w") as f:
               f.write("pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }\n")
@@ -58,7 +58,7 @@ jobs:
               f.write("rootProject.name='webapp'\ninclude ':app'\n")
 
           with open("build.gradle", "w") as f:
-              f.write("plugins { id 'com.android.application' version '8.7.3' apply false }\n")
+              f.write("plugins { id 'com.android.application' version '8.9.1' apply false }\n")
 
           with open("gradle.properties", "w") as f:
               f.write("org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8\n")
@@ -73,7 +73,7 @@ jobs:
               "",
               "android {",
               "    namespace '%s'" % pkg,
-              "    compileSdk 35",
+              "    compileSdk 36",
               "",
               "    defaultConfig {",
               "        applicationId '%s'" % pkg,
@@ -83,12 +83,24 @@ jobs:
               "        versionName '%s'" % a['version_name'],
               "    }",
               "",
+              "    signingConfigs {",
+              "        permanent {",
+              "            if (System.getenv('KEYSTORE_PATH')) {",
+              "                storeFile file(System.getenv('KEYSTORE_PATH'))",
+              "                storePassword System.getenv('KEYSTORE_PASSWORD')",
+              "                keyAlias System.getenv('KEY_ALIAS')",
+              "                keyPassword System.getenv('KEY_PASSWORD')",
+              "            }",
+              "        }",
+              "    }",
+              "",
               "    buildTypes {",
               "        release {",
               "            minifyEnabled false",
-              "            signingConfig signingConfigs.debug",
+              "            signingConfig System.getenv('KEYSTORE_PATH') ? signingConfigs.permanent : signingConfigs.debug",
               "        }",
               "        debug {",
+              "            signingConfig System.getenv('KEYSTORE_PATH') ? signingConfigs.permanent : signingConfigs.debug",
               "        }",
               "    }",
               "",
@@ -114,8 +126,8 @@ jobs:
           EOF
           python3 generate_base.py
 
-          # Generate Gradle wrapper (8.9 works with AGP 8.7.3)
-          gradle wrapper --gradle-version 8.9 --distribution-type bin
+          # Generate Gradle wrapper (8.11.1 is the minimum for AGP 8.9.1, needed for API 36)
+          gradle wrapper --gradle-version 8.11.1 --distribution-type bin
           chmod +x ./gradlew
 
       - name: 4. Processing App Icon & Splash Screen
@@ -205,7 +217,7 @@ jobs:
           import android.annotation.SuppressLint;import android.content.Intent;import android.graphics.Color;import android.net.Uri;import android.os.*;import android.view.*;import android.webkit.*;import android.widget.*;
           import androidx.appcompat.app.AppCompatActivity;import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
           public class MainActivity extends AppCompatActivity{
-           static final String START=@@START@@;static final String OFFLINE=@@OFF@@;static final String UA=@@UA@@;static final boolean EXT=@@EXT@@;
+           static final String THEME=@@THEME@@;static final String START=@@START@@;static final String OFFLINE=@@OFF@@;static final String UA=@@UA@@;static final boolean EXT=@@EXT@@;
            WebView web;WebView splash;SwipeRefreshLayout sw;TextView off;ValueCallback<Uri[]> cb;
            @SuppressLint("SetJavaScriptEnabled") @Override protected void onCreate(Bundle b){
             super.onCreate(b);
@@ -217,7 +229,9 @@ jobs:
             off=new TextView(this);off.setText(OFFLINE);off.setGravity(Gravity.CENTER);off.setPadding(60,60,60,60);off.setTextSize(17);off.setBackgroundColor(Color.WHITE);off.setTextColor(Color.DKGRAY);off.setVisibility(View.GONE);
             off.setOnClickListener(v->{off.setVisibility(View.GONE);web.reload();});root.addView(off);
             splash=new WebView(this);splash.getSettings().setJavaScriptEnabled(false);splash.setBackgroundColor(Color.TRANSPARENT);splash.loadUrl("file:///android_asset/splash.html");root.addView(splash);
-            setContentView(root);
+            setContentView(root);root.setBackgroundColor(Color.parseColor(THEME));
+            androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root,(vw,ins)->{androidx.core.graphics.Insets bb=ins.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars()|androidx.core.view.WindowInsetsCompat.Type.ime());vw.setPadding(bb.left,bb.top,bb.right,bb.bottom);return androidx.core.view.WindowInsetsCompat.CONSUMED;});
+            getOnBackPressedDispatcher().addCallback(this,new androidx.activity.OnBackPressedCallback(true){@Override public void handleOnBackPressed(){if(web.canGoBack())web.goBack();else{setEnabled(false);getOnBackPressedDispatcher().onBackPressed();}}});
             WebSettings s=web.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);s.setMediaPlaybackRequiresUserGesture(false);s.setGeolocationEnabled(true);s.setAllowFileAccess(false);s.setDatabaseEnabled(true);s.setTextZoom(100);s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);s.setJavaScriptCanOpenWindowsAutomatically(true);
             if((getApplicationInfo().flags&android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE)!=0)WebView.setWebContentsDebuggingEnabled(true);
             if(UA.length()>0)s.setUserAgentString(s.getUserAgentString()+" "+UA);
@@ -245,9 +259,9 @@ jobs:
            }
            @Override protected void onActivityResult(int rq,int rs,Intent d){if(rq==1&&cb!=null){cb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(rs,d));cb=null;}else super.onActivityResult(rq,rs,d);}
            @Override protected void onPause(){CookieManager.getInstance().flush();super.onPause();}
-           @Override public void onBackPressed(){if(web.canGoBack())web.goBack();else super.onBackPressed();}
+           
           }"""
-          java_code = java_code.replace('@@PKG@@', pkg).replace('@@START@@', jstr(app.get('start_url') or app['url']))
+          java_code = java_code.replace('@@THEME@@', jstr(app['theme_color'])).replace('@@PKG@@', pkg).replace('@@START@@', jstr(app.get('start_url') or app['url']))
           java_code = java_code.replace('@@OFF@@', jstr(app.get('offline_msg') or 'No internet connection'))
           java_code = java_code.replace('@@UA@@', jstr(cs.get('user_agent', ''))).replace('@@EXT@@', 'true' if cs.get('external') else 'false')
           java_code = java_code.replace('@@FULL@@', 'true' if app.get('fullscreen') else 'false')
@@ -265,7 +279,57 @@ jobs:
       - name: 6. Compiling Android Resources
         uses: android-actions/setup-android@v3
         with:
-          packages: 'platforms;android-35 build-tools;35.0.0'
+          packages: 'platforms;android-36 platforms;android-35 build-tools;36.0.0 build-tools;35.0.0'
+
+      - name: 6b. Preparing Signing Key
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KS_KPASS: ${{ secrets.KEY_PASSWORD }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            # Option A: one shared key from GitHub Secrets
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            {
+              echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks"
+              echo "KEYSTORE_PASSWORD=$KS_PASS"
+              echo "KEY_ALIAS=$KS_ALIAS"
+              echo "KEY_PASSWORD=${KS_KPASS:-$KS_PASS}"
+            } >> "$GITHUB_ENV"
+            echo "Using permanent signing key from Secrets"
+          elif [ "$REPO_PRIVATE" != "true" ]; then
+            echo "::warning::Repository is PUBLIC - refusing to store a signing key here. Using a temporary debug key (updates will not install over older builds)."
+          else
+            # Option B: one key per app (package), created automatically on its first build and stored in keys/
+            PKG=$(python3 -c "import json;print(json.load(open('workspace/config.json'))['app']['package'])")
+            mkdir -p keys
+            if [ ! -f "keys/$PKG.jks" ]; then
+              PASS=$(openssl rand -hex 16)
+              echo "::add-mask::$PASS"
+              keytool -genkeypair -keystore "keys/$PKG.jks" -alias app -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "$PASS" -keypass "$PASS" -dname "CN=$PKG, O=App, C=BD"
+              printf 'alias=app\npassword=%s\n' "$PASS" > "keys/$PKG.properties"
+              git config user.name "github-actions[bot]"
+              git config user.email "github-actions[bot]@users.noreply.github.com"
+              git add "keys/$PKG.jks" "keys/$PKG.properties"
+              git commit -m "Create signing key for $PKG"
+              git pull --rebase || true
+              git push
+              echo "Created a NEW signing key for $PKG (keys/$PKG.jks)"
+            else
+              echo "Using saved signing key for $PKG"
+            fi
+            PASS=$(grep '^password=' "keys/$PKG.properties" | cut -d= -f2-)
+            echo "::add-mask::$PASS"
+            {
+              echo "KEYSTORE_PATH=$GITHUB_WORKSPACE/keys/$PKG.jks"
+              echo "KEYSTORE_PASSWORD=$PASS"
+              echo "KEY_ALIAS=app"
+              echo "KEY_PASSWORD=$PASS"
+            } >> "$GITHUB_ENV"
+          fi
 
       - name: 7. Running Gradle Build
         working-directory: workspace
@@ -305,7 +369,11 @@ jobs:
           ls -la ../dist/
 
       - name: 9. Signing Application
-        run: echo "Verified application signing"
+        run: |
+          for f in dist/*.apk; do
+            [ -f "$f" ] && "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$f" | grep -E "SHA-256|Signer" || true
+          done
+          echo "Compare the SHA-256 above between builds: same value = users can update in place."
 
       - name: 10. Verifying Build Output
         run: |
