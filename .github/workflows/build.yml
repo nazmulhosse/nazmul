@@ -90,6 +90,7 @@ jobs:
               "                storePassword System.getenv('KEYSTORE_PASSWORD')",
               "                keyAlias System.getenv('KEY_ALIAS')",
               "                keyPassword System.getenv('KEY_PASSWORD')",
+              "                if (System.getenv('KEYSTORE_TYPE')) { storeType System.getenv('KEYSTORE_TYPE') }",
               "            }",
               "        }",
               "    }",
@@ -201,7 +202,7 @@ jobs:
           icon_attr = '@mipmap/ic_launcher' if os.path.exists('app/src/main/res/mipmap-xxxhdpi/ic_launcher.png') else '@drawable/ic_launcher'
 
           with open('app/src/main/AndroidManifest.xml', 'w') as f:
-              f.write(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android">{pm_str}<application android:label="@string/app_name" android:icon="{icon_attr}" android:theme="@style/AppTheme" android:usesCleartextTraffic="true"><activity android:name=".MainActivity" android:exported="true" android:screenOrientation="{ori}" android:windowSoftInputMode="adjustResize" android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity><provider android:name=\"androidx.core.content.FileProvider\" android:authorities=\"{pkg}.fileprovider\" android:exported=\"false\" android:grantUriPermissions=\"true\"><meta-data android:name=\"android.support.FILE_PROVIDER_PATHS\" android:resource=\"@xml/file_paths\"/></provider></application></manifest>')
+              f.write(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android">{pm_str}<application android:label="@string/app_name" android:icon="{icon_attr}" android:theme="@style/AppTheme" android:usesCleartextTraffic="true"><activity android:name=".MainActivity" android:exported="true" android:screenOrientation="{ori}" android:windowSoftInputMode="adjustResize" android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
 
           # escape characters that break Android strings.xml (apostrophe, quotes, &, <, @, ?)
           nm = app["name"].replace("&", "&amp;").replace("<", "&lt;").replace("'", "\\'").replace('"', '\\"')
@@ -210,20 +211,15 @@ jobs:
               f.write(f'<resources><string name="app_name">{nm}</string></resources>')
           with open('app/src/main/res/values/themes.xml', 'w') as f:
               f.write(f'<resources><style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar"><item name="android:statusBarColor">{app["theme_color"]}</item><item name="android:navigationBarColor">{app.get("nav_color","#ffffff")}</item><item name="android:windowBackground">{app["splash_color"]}</item></style></resources>')
-          os.makedirs('app/src/main/res/xml', exist_ok=True)
-          with open('app/src/main/res/xml/file_paths.xml', 'w') as f:
-              f.write('<?xml version="1.0" encoding="utf-8"?><paths><external-files-path name="dl" path="."/><files-path name="fp" path="."/><cache-path name="cp" path="."/></paths>')
 
           cs = app.get('custom', {})
           jstr = lambda s: json.dumps(s)
           java_code = """package @@PKG@@;
           import android.annotation.SuppressLint;import android.content.Intent;import android.graphics.Color;import android.net.Uri;import android.os.*;import android.view.*;import android.webkit.*;import android.widget.*;
           import androidx.appcompat.app.AppCompatActivity;import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
-          import android.content.ContentValues;import android.provider.MediaStore;import android.util.Base64;import android.app.DownloadManager;import android.print.PrintAttributes;import android.print.PrintManager;import androidx.core.content.FileProvider;import org.json.JSONObject;import java.io.File;import java.io.FileOutputStream;import java.io.IOException;import java.io.OutputStream;
           public class MainActivity extends AppCompatActivity{
            static final String THEME=@@THEME@@;static final String START=@@START@@;static final String OFFLINE=@@OFF@@;static final String UA=@@UA@@;static final boolean EXT=@@EXT@@;
            WebView web;WebView splash;SwipeRefreshLayout sw;TextView off;ValueCallback<Uri[]> cb;
-           volatile boolean trusted=false;WebView printWeb;
            @SuppressLint("SetJavaScriptEnabled") @Override protected void onCreate(Bundle b){
             super.onCreate(b);
             if(@@FULL@@){getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,WindowManager.LayoutParams.FLAG_FULLSCREEN);
@@ -246,8 +242,7 @@ jobs:
              @Override public boolean shouldOverrideUrlLoading(WebView v,WebResourceRequest r){Uri u=r.getUrl();String sc=u.getScheme()==null?"":u.getScheme();
               if(sc.equals("http")||sc.equals("https")){if(EXT&&u.getHost()!=null&&!u.getHost().equals(Uri.parse(START).getHost())){try{startActivity(new Intent(Intent.ACTION_VIEW,u));}catch(Exception e){}return true;}return false;}
               try{startActivity(new Intent(Intent.ACTION_VIEW,u));}catch(Exception e){}return true;}
-             @Override public void onPageStarted(WebView v,String u,android.graphics.Bitmap fv){try{String h=Uri.parse(u).getHost();trusted=h!=null&&h.equals(Uri.parse(START).getHost());}catch(Exception e){trusted=false;}}
-             @Override public void onPageFinished(WebView v,String u){sw.setRefreshing(false);CookieManager.getInstance().flush();v.evaluateJavascript(\"window.print=function(){AndroidBridge.printPage()}\",null);}
+             @Override public void onPageFinished(WebView v,String u){sw.setRefreshing(false);CookieManager.getInstance().flush();v.evaluateJavascript(\"window.print=function(){AndroidPrint.print()}\",null);}
              @Override public void onReceivedError(WebView v,WebResourceRequest r,WebResourceError e){if(r.isForMainFrame()){sw.setRefreshing(false);off.setVisibility(View.VISIBLE);}}
             });
             web.setWebChromeClient(new WebChromeClient(){
@@ -257,68 +252,11 @@ jobs:
              @Override public boolean onJsAlert(WebView v,String u,String m,JsResult r){new android.app.AlertDialog.Builder(MainActivity.this).setMessage(m).setPositiveButton(android.R.string.ok,(d,w)->r.confirm()).setOnCancelListener(d->r.cancel()).show();return true;}
              @Override public boolean onJsConfirm(WebView v,String u,String m,JsResult r){new android.app.AlertDialog.Builder(MainActivity.this).setMessage(m).setPositiveButton(android.R.string.ok,(d,w)->r.confirm()).setNegativeButton(android.R.string.cancel,(d,w)->r.cancel()).setOnCancelListener(d->r.cancel()).show();return true;}
             });
-            web.setDownloadListener((u,ua,cd,mt,l)->handleDownload(u,ua,cd,mt));
+            web.setDownloadListener((u,ua,cd,mt,l)->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(u)));}catch(Exception e){}});
             String[] P=new String[]{@@PERMS@@};if(Build.VERSION.SDK_INT>=23&&P.length>0)requestPermissions(P,2);
-            web.addJavascriptInterface(new Bridge(),\"AndroidBridge\");
+            web.addJavascriptInterface(new Object(){@JavascriptInterface public void print(){runOnUiThread(()->{try{((android.print.PrintManager)getSystemService(PRINT_SERVICE)).print(\"Report\",web.createPrintDocumentAdapter(\"Report\"),new android.print.PrintAttributes.Builder().build());}catch(Exception e){}});}},\"AndroidPrint\");
             root.getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener(){boolean d;@Override public void onGlobalLayout(){if(d||web.getHeight()<=0)return;d=true;root.getViewTreeObserver().removeOnGlobalLayoutListener(this);web.loadUrl(START);}});
             new Handler(Looper.getMainLooper()).postDelayed(()->splash.setVisibility(View.GONE),@@DUR@@);
-           }
-           class Bridge{
-            @JavascriptInterface public void saveFile(String b64,String name,String mime){if(!trusted)return;try{doSave(Base64.decode(b64,Base64.DEFAULT),name,mime);}catch(Exception e){toast("ফাইল সেভ হয়নি");}}
-            @JavascriptInterface public void printPage(){runOnUiThread(()->doPrint(web,"Report"));}
-            @JavascriptInterface public void printHtml(String html,String job){if(!trusted)return;runOnUiThread(()->{try{printWeb=new WebView(MainActivity.this);printWeb.getSettings().setJavaScriptEnabled(false);printWeb.setWebViewClient(new WebViewClient(){@Override public void onPageFinished(WebView v,String u){doPrint(v,job);}});printWeb.loadDataWithBaseURL(null,html,"text/html","UTF-8",null);}catch(Exception e){toast("প্রিন্ট শুরু হয়নি");}});}
-           }
-           void toast(String m){runOnUiThread(()->Toast.makeText(this,m,Toast.LENGTH_LONG).show());}
-           void doPrint(WebView w,String job){try{PrintManager pm=(PrintManager)getSystemService(PRINT_SERVICE);pm.print(job,w.createPrintDocumentAdapter(job),new PrintAttributes.Builder().setMediaSize(PrintAttributes.MediaSize.ISO_A4).build());}catch(Exception e){toast("প্রিন্ট শুরু করা যায়নি");}}
-           String cleanName(String n){if(n==null||n.trim().length()==0)n="file";StringBuilder sb=new StringBuilder();for(int i=0;i<n.length()&&i<100;i++){char c=n.charAt(i);if(c=='/'||c==92||c==':'||c=='*'||c=='?'||c=='"'||c=='<'||c=='>'||c=='|'||c<32)c='_';sb.append(c);}String r=sb.toString().trim();if(r.startsWith("."))r="_"+r;return r;}
-           void doSave(byte[] data,String name,String mime){
-            try{
-             name=cleanName(name);if(mime==null||mime.length()==0||mime.contains("android.package-archive"))mime="application/octet-stream";
-             Uri uri;
-             if(Build.VERSION.SDK_INT>=29){
-              ContentValues cv=new ContentValues();cv.put(MediaStore.MediaColumns.DISPLAY_NAME,name);cv.put(MediaStore.MediaColumns.MIME_TYPE,mime);cv.put(MediaStore.MediaColumns.RELATIVE_PATH,Environment.DIRECTORY_DOWNLOADS);cv.put(MediaStore.MediaColumns.IS_PENDING,1);
-              uri=getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI,cv);
-              if(uri==null)throw new IOException("insert");
-              OutputStream os=getContentResolver().openOutputStream(uri);os.write(data);os.close();
-              cv.clear();cv.put(MediaStore.MediaColumns.IS_PENDING,0);getContentResolver().update(uri,cv,null,null);
-             }else{
-              File dir=getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);if(dir==null)dir=getFilesDir();dir.mkdirs();
-              File f=new File(dir,name);FileOutputStream os=new FileOutputStream(f);os.write(data);os.close();
-              uri=FileProvider.getUriForFile(this,getPackageName()+".fileprovider",f);
-             }
-             askOpen(uri,mime,name);
-            }catch(Exception e){toast("ফাইল সেভ করা যায়নি");}
-           }
-           void askOpen(Uri uri,String mime,String name){runOnUiThread(()->{
-            try{new android.app.AlertDialog.Builder(MainActivity.this).setTitle("ফাইল সেভ হয়েছে").setMessage(name)
-             .setPositiveButton("খুলুন",(d,w)->{Intent i=new Intent(Intent.ACTION_VIEW);i.setDataAndType(uri,mime);i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_ACTIVITY_NEW_TASK);try{startActivity(i);}catch(Exception e){toast("এই ফাইল খোলার অ্যাপ নেই");}})
-             .setNegativeButton("শেয়ার",(d,w)->{Intent i=new Intent(Intent.ACTION_SEND);i.setType(mime);i.putExtra(Intent.EXTRA_STREAM,uri);i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);try{startActivity(Intent.createChooser(i,name));}catch(Exception e){}})
-             .setNeutralButton("ঠিক আছে",null).show();}catch(Exception e){}
-           });}
-           void handleDownload(String u,String ua,String cd,String mt){
-            try{
-             if(u.startsWith("blob:")){
-              String q=JSONObject.quote(u),n=JSONObject.quote(URLUtil.guessFileName(u,cd,mt)),m=JSONObject.quote(mt==null?"":mt);
-              web.evaluateJavascript("(async function(){try{var r=await fetch("+q+");var b=await r.blob();var f=new FileReader();f.onloadend=function(){AndroidBridge.saveFile(String(f.result).split(',')[1],"+n+","+m+"||b.type)};f.readAsDataURL(b);}catch(e){}})()",null);
-              return;
-             }
-             if(u.startsWith("data:")){
-              int c=u.indexOf(',');
-              if(c>0&&trusted&&u.substring(0,c).contains(";base64")){String m=u.substring(5,c).split(";")[0];doSave(Base64.decode(Uri.decode(u.substring(c+1)),Base64.DEFAULT),cd!=null&&cd.length()>0?URLUtil.guessFileName(u,cd,mt):"download",m);}
-              return;
-             }
-             if(u.startsWith("http")){
-              String fn=URLUtil.guessFileName(u,cd,mt);
-              DownloadManager.Request rq=new DownloadManager.Request(Uri.parse(u));
-              String ck=CookieManager.getInstance().getCookie(u);if(ck!=null)rq.addRequestHeader("Cookie",ck);
-              if(ua!=null)rq.addRequestHeader("User-Agent",ua);
-              if(mt!=null&&mt.length()>0)rq.setMimeType(mt);
-              rq.setTitle(fn);rq.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-              if(Build.VERSION.SDK_INT>=29)rq.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS,fn);else rq.setDestinationInExternalFilesDir(this,Environment.DIRECTORY_DOWNLOADS,fn);
-              ((DownloadManager)getSystemService(DOWNLOAD_SERVICE)).enqueue(rq);
-              toast("ডাউনলোড শুরু হয়েছে");
-             }
-            }catch(Exception e){toast("ডাউনলোড করা যায়নি");}
            }
            @Override protected void onActivityResult(int rq,int rs,Intent d){if(rq==1&&cb!=null){cb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(rs,d));cb=null;}else super.onActivityResult(rq,rs,d);}
            @Override protected void onPause(){CookieManager.getInstance().flush();super.onPause();}
@@ -334,7 +272,7 @@ jobs:
           java_code = java_code.replace('@@PERMS@@', rt_str)
 
           os.makedirs(f"app/src/main/java/{pkg.replace('.', '/')}", exist_ok=True)
-          with open(f"app/src/main/java/{pkg.replace('.', '/')}/MainActivity.java", 'w', encoding='utf-8') as f:
+          with open(f"app/src/main/java/{pkg.replace('.', '/')}/MainActivity.java", 'w') as f:
               f.write(java_code)
           EOF
           python3 gen_code.py
@@ -346,53 +284,50 @@ jobs:
 
       - name: 6b. Preparing Signing Key
         env:
-          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
-          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
-          KS_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KS_KPASS: ${{ secrets.KEY_PASSWORD }}
-          REPO_PRIVATE: ${{ github.event.repository.private }}
+          ENC_SECRET: ${{ secrets.BUILD_ENC_KEY }}
+          BUILD_ID: ${{ github.event.inputs.build_id }}
         run: |
-          if [ -n "$KS_B64" ]; then
-            # Option A: one shared key from GitHub Secrets
-            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
-            {
-              echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks"
-              echo "KEYSTORE_PASSWORD=$KS_PASS"
-              echo "KEY_ALIAS=$KS_ALIAS"
-              echo "KEY_PASSWORD=${KS_KPASS:-$KS_PASS}"
-            } >> "$GITHUB_ENV"
-            echo "Using permanent signing key from Secrets"
-          elif [ "$REPO_PRIVATE" != "true" ]; then
-            echo "::warning::Repository is PUBLIC - refusing to store a signing key here. Using a temporary debug key (updates will not install over older builds)."
-          else
-            # Option B: one key per app (package), created automatically on its first build and stored in keys/
-            PKG=$(python3 -c "import json;print(json.load(open('workspace/config.json'))['app']['package'])")
-            mkdir -p keys
-            if [ ! -f "keys/$PKG.jks" ]; then
-              PASS=$(openssl rand -hex 16)
-              echo "::add-mask::$PASS"
-              keytool -genkeypair -keystore "keys/$PKG.jks" -alias app -keyalg RSA -keysize 2048 -validity 10000 \
-                -storepass "$PASS" -keypass "$PASS" -dname "CN=$PKG, O=App, C=BD"
-              printf 'alias=app\npassword=%s\n' "$PASS" > "keys/$PKG.properties"
-              git config user.name "github-actions[bot]"
-              git config user.email "github-actions[bot]@users.noreply.github.com"
-              git add "keys/$PKG.jks" "keys/$PKG.properties"
-              git commit -m "Create signing key for $PKG"
-              git pull --rebase || true
-              git push
-              echo "Created a NEW signing key for $PKG (keys/$PKG.jks)"
-            else
-              echo "Using saved signing key for $PKG"
-            fi
-            PASS=$(grep '^password=' "keys/$PKG.properties" | cut -d= -f2-)
-            echo "::add-mask::$PASS"
-            {
-              echo "KEYSTORE_PATH=$GITHUB_WORKSPACE/keys/$PKG.jks"
-              echo "KEYSTORE_PASSWORD=$PASS"
-              echo "KEY_ALIAS=app"
-              echo "KEY_PASSWORD=$PASS"
-            } >> "$GITHUB_ENV"
+          # Permanent per-app key only. NO temporary/debug fallback: a build that cannot use its key must fail,
+          # otherwise the APK could not update the previously installed version.
+          if [ -z "$ENC_SECRET" ]; then
+            echo "::error::GitHub Secret BUILD_ENC_KEY is not set (must equal GH_SIGN_SECRET in apk_builder.php)."
+            exit 1
           fi
+          if [ ! -f "builds/$BUILD_ID/signing.enc" ]; then
+            echo "::error::builds/$BUILD_ID/signing.enc missing - the panel did not send the signing key. Refusing to build with a temporary key."
+            exit 1
+          fi
+          pip install cryptography -q --break-system-packages || pip install cryptography -q || true
+          cat << 'EOF' > /tmp/prep_sign.py
+          import os, sys, json, base64, hashlib, subprocess
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          raw = base64.b64decode(open('builds/%s/signing.enc' % os.environ['BUILD_ID']).read().strip())
+          iv, tag, ct = raw[:12], raw[12:28], raw[28:]
+          try:
+              d = json.loads(AESGCM(hashlib.sha256(os.environ['ENC_SECRET'].encode()).digest()).decrypt(iv, ct + tag, None))
+          except Exception:
+              print('::error::signing.enc could not be decrypted - BUILD_ENC_KEY does not match GH_SIGN_SECRET in apk_builder.php')
+              sys.exit(1)
+          for k in ('store_pass', 'key_pass'):
+              if '\n' in d[k] or '\r' in d[k]:
+                  print('::error::keystore password contains a line break'); sys.exit(1)
+              print('::add-mask::' + d[k])
+          ks = os.path.join(os.environ['RUNNER_TEMP'], 'release.keystore')
+          with open(ks, 'wb') as f: f.write(base64.b64decode(d['ks']))
+          r = subprocess.run(['keytool', '-list', '-v', '-keystore', ks, '-storetype', d['type'], '-storepass', d['store_pass'], '-alias', d['alias']], capture_output=True, text=True)
+          fp = ''
+          for line in r.stdout.splitlines():
+              if 'SHA256:' in line:
+                  fp = line.split('SHA256:')[1].strip().replace(':', '').lower(); break
+          if r.returncode != 0 or not fp:
+              print('::error::keystore could not be opened or alias not found (type=%s, alias=%s)' % (d['type'], d['alias']))
+              print(r.stdout[-600:]); print(r.stderr[-600:]); sys.exit(1)
+          print('Permanent signing key loaded. Keystore certificate SHA-256: ' + fp)
+          with open(os.environ['GITHUB_ENV'], 'a') as g:
+              g.write('KEYSTORE_PATH=%s\nKEYSTORE_PASSWORD=%s\nKEY_ALIAS=%s\nKEY_PASSWORD=%s\nKEYSTORE_TYPE=%s\nEXPECTED_SHA256=%s\n' % (ks, d['store_pass'], d['alias'], d['key_pass'], d['type'], fp))
+          EOF
+          python3 /tmp/prep_sign.py
+          rm -f /tmp/prep_sign.py
 
       - name: 7. Running Gradle Build
         working-directory: workspace
@@ -433,10 +368,32 @@ jobs:
 
       - name: 9. Signing Application
         run: |
+          # Verify every output is signed by the permanent key (same certificate = users can update in place)
+          norm() { tr -d ': \n\r' | tr 'A-F' 'a-f'; }
+          FOUND=0
           for f in dist/*.apk; do
-            [ -f "$f" ] && "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$f" | grep -E "SHA-256|Signer" || true
+            [ -f "$f" ] || continue
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$f" > /tmp/cert.txt 2>&1 || { cat /tmp/cert.txt; echo "::error::apksigner verification failed for $f"; exit 1; }
+            GOT=$(grep -m1 'certificate SHA-256 digest' /tmp/cert.txt | awk -F': ' '{print $2}' | norm)
+            echo "$f -> signer SHA-256: $GOT"
+            if [ -z "$GOT" ] || [ "$GOT" != "$EXPECTED_SHA256" ]; then
+              echo "::error::Signing certificate does NOT match the permanent keystore (expected $EXPECTED_SHA256). This APK would not update the installed app."
+              exit 1
+            fi
+            FOUND=1
           done
-          echo "Compare the SHA-256 above between builds: same value = users can update in place."
+          for f in dist/*.aab; do
+            [ -f "$f" ] || continue
+            GOT=$(keytool -printcert -jarfile "$f" 2>/dev/null | grep -m1 'SHA256:' | awk -F'SHA256:' '{print $2}' | norm)
+            echo "$f -> signer SHA-256: $GOT"
+            if [ -n "$GOT" ] && [ "$GOT" != "$EXPECTED_SHA256" ]; then
+              echo "::error::AAB signing certificate does NOT match the permanent keystore."
+              exit 1
+            fi
+            FOUND=1
+          done
+          [ "$FOUND" -eq 1 ] || { echo "::error::No APK/AAB to verify"; exit 1; }
+          echo "OK: signed with the permanent key (SHA-256 $EXPECTED_SHA256)"
 
       - name: 10. Verifying Build Output
         run: |
