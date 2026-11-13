@@ -192,17 +192,25 @@ jobs:
           app = cfg['app']
           pkg = app['package']
 
-          perms = ['INTERNET', 'ACCESS_NETWORK_STATE']
+          # REQUEST_INSTALL_PACKAGES: needed for the in-app update installer
+          perms = ['INTERNET', 'ACCESS_NETWORK_STATE', 'REQUEST_INSTALL_PACKAGES']
           pm_map = {'camera':['CAMERA'],'location':['ACCESS_FINE_LOCATION','ACCESS_COARSE_LOCATION'],'storage':['READ_EXTERNAL_STORAGE','READ_MEDIA_IMAGES'],'mic':['RECORD_AUDIO','MODIFY_AUDIO_SETTINGS'],'notifications':['POST_NOTIFICATIONS']}
           for p in app.get('permissions', []): perms.extend(pm_map.get(p, []))
           pm_str = ''.join([f'<uses-permission android:name="android.permission.{p}"/>' for p in perms])
-          rt_str = ','.join([f'"android.permission.{p}"' for p in perms])
+          # runtime permission request list (REQUEST_INSTALL_PACKAGES is not a runtime permission)
+          rt_perms = [p for p in perms if p != 'REQUEST_INSTALL_PACKAGES']
+          rt_str = ','.join([f'"android.permission.{p}"' for p in rt_perms])
           ori = {'auto':'unspecified','portrait':'portrait','landscape':'landscape'}.get(app.get('orientation', 'auto'), 'unspecified')
 
           icon_attr = '@mipmap/ic_launcher' if os.path.exists('app/src/main/res/mipmap-xxxhdpi/ic_launcher.png') else '@drawable/ic_launcher'
 
           with open('app/src/main/AndroidManifest.xml', 'w') as f:
-              f.write(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android">{pm_str}<application android:label="@string/app_name" android:icon="{icon_attr}" android:theme="@style/AppTheme" android:usesCleartextTraffic="true"><activity android:name=".MainActivity" android:exported="true" android:screenOrientation="{ori}" android:windowSoftInputMode="adjustResize" android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>')
+              f.write(f'<manifest xmlns:android="http://schemas.android.com/apk/res/android">{pm_str}<application android:label="@string/app_name" android:icon="{icon_attr}" android:theme="@style/AppTheme" android:usesCleartextTraffic="true"><activity android:name=".MainActivity" android:exported="true" android:screenOrientation="{ori}" android:windowSoftInputMode="adjustResize" android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity><provider android:name="androidx.core.content.FileProvider" android:authorities="{pkg}.fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths"/></provider></application></manifest>')
+
+          # FileProvider paths (the downloaded update APK is kept in the cache dir)
+          os.makedirs('app/src/main/res/xml', exist_ok=True)
+          with open('app/src/main/res/xml/file_paths.xml', 'w') as f:
+              f.write('<?xml version="1.0" encoding="utf-8"?><paths><external-files-path name="dl" path="."/><files-path name="fp" path="."/><cache-path name="cp" path="."/></paths>')
 
           # escape characters that break Android strings.xml (apostrophe, quotes, &, <, @, ?)
           nm = app["name"].replace("&", "&amp;").replace("<", "&lt;").replace("'", "\\'").replace('"', '\\"')
@@ -217,9 +225,11 @@ jobs:
           java_code = """package @@PKG@@;
           import android.annotation.SuppressLint;import android.content.Intent;import android.graphics.Color;import android.net.Uri;import android.os.*;import android.view.*;import android.webkit.*;import android.widget.*;
           import androidx.appcompat.app.AppCompatActivity;import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+          import android.content.pm.PackageInfo;import java.io.File;import java.io.FileOutputStream;import java.io.IOException;import java.io.InputStream;import java.net.HttpURLConnection;import java.net.URL;import org.json.JSONObject;import androidx.core.content.FileProvider;
           public class MainActivity extends AppCompatActivity{
            static final String THEME=@@THEME@@;static final String START=@@START@@;static final String OFFLINE=@@OFF@@;static final String UA=@@UA@@;static final boolean EXT=@@EXT@@;
            WebView web;WebView splash;SwipeRefreshLayout sw;TextView off;ValueCallback<Uri[]> cb;
+           volatile boolean trusted=false;static final String APKX_MARK="apkx-native-v1";String pendingApk=null;volatile boolean dlBusy=false;volatile String curUA="";
            @SuppressLint("SetJavaScriptEnabled") @Override protected void onCreate(Bundle b){
             super.onCreate(b);
             if(@@FULL@@){getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,WindowManager.LayoutParams.FLAG_FULLSCREEN);
@@ -235,13 +245,14 @@ jobs:
             getOnBackPressedDispatcher().addCallback(this,new androidx.activity.OnBackPressedCallback(true){@Override public void handleOnBackPressed(){if(web.canGoBack())web.goBack();else{setEnabled(false);getOnBackPressedDispatcher().onBackPressed();}}});
             WebSettings s=web.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);s.setMediaPlaybackRequiresUserGesture(false);s.setGeolocationEnabled(true);s.setAllowFileAccess(false);s.setDatabaseEnabled(true);s.setTextZoom(100);s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);s.setJavaScriptCanOpenWindowsAutomatically(true);
             if((getApplicationInfo().flags&android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE)!=0)WebView.setWebContentsDebuggingEnabled(true);
-            if(UA.length()>0)s.setUserAgentString(s.getUserAgentString()+" "+UA);
+            s.setUserAgentString(s.getUserAgentString()+(UA.length()>0?" "+UA:"")+" APKV/"+vcode()+" APKP/"+getPackageName());curUA=s.getUserAgentString();
             if(@@ZOOM@@){s.setSupportZoom(true);s.setBuiltInZoomControls(true);s.setDisplayZoomControls(false);}
             CookieManager.getInstance().setAcceptCookie(true);CookieManager.getInstance().setAcceptThirdPartyCookies(web,true);
             web.setWebViewClient(new WebViewClient(){
              @Override public boolean shouldOverrideUrlLoading(WebView v,WebResourceRequest r){Uri u=r.getUrl();String sc=u.getScheme()==null?"":u.getScheme();
               if(sc.equals("http")||sc.equals("https")){if(EXT&&u.getHost()!=null&&!u.getHost().equals(Uri.parse(START).getHost())){try{startActivity(new Intent(Intent.ACTION_VIEW,u));}catch(Exception e){}return true;}return false;}
               try{startActivity(new Intent(Intent.ACTION_VIEW,u));}catch(Exception e){}return true;}
+             @Override public void onPageStarted(WebView v,String u,android.graphics.Bitmap fv){try{String h=Uri.parse(u).getHost();trusted=h!=null&&h.equals(Uri.parse(START).getHost());}catch(Exception e){trusted=false;}}
              @Override public void onPageFinished(WebView v,String u){sw.setRefreshing(false);CookieManager.getInstance().flush();v.evaluateJavascript(\"window.print=function(){AndroidPrint.print()}\",null);}
              @Override public void onReceivedError(WebView v,WebResourceRequest r,WebResourceError e){if(r.isForMainFrame()){sw.setRefreshing(false);off.setVisibility(View.VISIBLE);}}
             });
@@ -255,9 +266,72 @@ jobs:
             web.setDownloadListener((u,ua,cd,mt,l)->{try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(u)));}catch(Exception e){}});
             String[] P=new String[]{@@PERMS@@};if(Build.VERSION.SDK_INT>=23&&P.length>0)requestPermissions(P,2);
             web.addJavascriptInterface(new Object(){@JavascriptInterface public void print(){runOnUiThread(()->{try{((android.print.PrintManager)getSystemService(PRINT_SERVICE)).print(\"Report\",web.createPrintDocumentAdapter(\"Report\"),new android.print.PrintAttributes.Builder().build());}catch(Exception e){}});}},\"AndroidPrint\");
+            web.addJavascriptInterface(new Bridge(),"AndroidBridge");
             root.getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener(){boolean d;@Override public void onGlobalLayout(){if(d||web.getHeight()<=0)return;d=true;root.getViewTreeObserver().removeOnGlobalLayoutListener(this);web.loadUrl(START);}});
             new Handler(Looper.getMainLooper()).postDelayed(()->splash.setVisibility(View.GONE),@@DUR@@);
            }
+           class Bridge{
+            @JavascriptInterface public String nativeVer(){return APKX_MARK;}
+            @JavascriptInterface public int getVersionCode(){return (int)vcode();}
+            @JavascriptInterface public void installApk(String url,String name,int size){if(!trusted)return;startUpdate(url,name,size);}
+           }
+           long vcode(){try{PackageInfo pi=getPackageManager().getPackageInfo(getPackageName(),0);return Build.VERSION.SDK_INT>=28?pi.getLongVersionCode():pi.versionCode;}catch(Exception e){return 0;}}
+           boolean sameHost(String u){try{String h=Uri.parse(u).getHost();String sh=Uri.parse(START).getHost();return h!=null&&sh!=null&&h.equalsIgnoreCase(sh);}catch(Exception e){return false;}}
+           void upd(String st,String v){runOnUiThread(()->{try{web.evaluateJavascript("try{window.__apkInst&&window.__apkInst("+JSONObject.quote(st)+","+JSONObject.quote(v)+")}catch(e){}",null);}catch(Exception e){}});}
+           boolean canInstall(){return Build.VERSION.SDK_INT<26||getPackageManager().canRequestPackageInstalls();}
+           void startUpdate(String url,String name,int size){
+            if(pendingApk!=null){runOnUiThread(()->tryInstall());return;}
+            if(dlBusy)return;
+            if(url==null||!url.startsWith("http")||!sameHost(url)){upd("err","url");return;}
+            dlBusy=true;
+            final String ck=CookieManager.getInstance().getCookie(url);final String ua=curUA;final String u0=url;final int sz0=size;
+            new Thread(()->{
+             HttpURLConnection c=null;
+             try{
+              File dir=new File(getCacheDir(),"update");dir.mkdirs();
+              File[] olds=dir.listFiles();if(olds!=null)for(File o:olds)o.delete();
+              File out=new File(dir,"update.apk");
+              c=(HttpURLConnection)new URL(u0).openConnection();
+              c.setConnectTimeout(20000);c.setReadTimeout(30000);c.setInstanceFollowRedirects(true);
+              if(ck!=null&&ck.length()>0)c.setRequestProperty("Cookie",ck);
+              if(ua!=null&&ua.length()>0)c.setRequestProperty("User-Agent",ua);
+              if(c.getResponseCode()!=200)throw new IOException("http");
+              String ct=c.getContentType();if(ct!=null&&ct.toLowerCase().contains("text/html"))throw new IOException("html");
+              long total=c.getContentLength();if(total<=0)total=sz0;
+              InputStream in=c.getInputStream();FileOutputStream os=new FileOutputStream(out);
+              byte[] buf=new byte[65536];long got=0;int n;int last=-1;
+              while((n=in.read(buf))>0){os.write(buf,0,n);got+=n;if(total>0){int pc=(int)Math.min(99,got*100/total);if(pc!=last){last=pc;upd("p",String.valueOf(pc));}}}
+              os.close();in.close();
+              if(got<1024)throw new IOException("small");
+              PackageInfo pi=getPackageManager().getPackageArchiveInfo(out.getAbsolutePath(),0);
+              if(pi==null)throw new IOException("bad");
+              if(!getPackageName().equals(pi.packageName)){dlBusy=false;upd("err","pkg");return;}
+              long av=Build.VERSION.SDK_INT>=28?pi.getLongVersionCode():pi.versionCode;
+              if(av<=vcode()){dlBusy=false;upd("err","ver");return;}
+              upd("p","100");
+              pendingApk=out.getAbsolutePath();
+              dlBusy=false;
+              runOnUiThread(()->tryInstall());
+             }catch(Exception e){dlBusy=false;upd("err","dl");}
+             finally{try{if(c!=null)c.disconnect();}catch(Exception e){}}
+            }).start();
+           }
+           void tryInstall(){
+            if(pendingApk==null)return;
+            if(!canInstall()){
+             upd("perm","");
+             try{Intent i=new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:"+getPackageName()));startActivity(i);}catch(Exception e){Toast.makeText(this,"Please allow this app to install updates in Settings",Toast.LENGTH_LONG).show();}
+             return;
+            }
+            try{
+             File f=new File(pendingApk);pendingApk=null;
+             Uri u=FileProvider.getUriForFile(this,getPackageName()+".fileprovider",f);
+             Intent i=new Intent(Intent.ACTION_VIEW);i.setDataAndType(u,"application/vnd.android.package-archive");
+             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_ACTIVITY_NEW_TASK);
+             startActivity(i);upd("inst","");
+            }catch(Exception e){upd("err","install");}
+           }
+           @Override protected void onResume(){super.onResume();if(pendingApk!=null&&canInstall())tryInstall();}
            @Override protected void onActivityResult(int rq,int rs,Intent d){if(rq==1&&cb!=null){cb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(rs,d));cb=null;}else super.onActivityResult(rq,rs,d);}
            @Override protected void onPause(){CookieManager.getInstance().flush();super.onPause();}
            
@@ -272,7 +346,7 @@ jobs:
           java_code = java_code.replace('@@PERMS@@', rt_str)
 
           os.makedirs(f"app/src/main/java/{pkg.replace('.', '/')}", exist_ok=True)
-          with open(f"app/src/main/java/{pkg.replace('.', '/')}/MainActivity.java", 'w') as f:
+          with open(f"app/src/main/java/{pkg.replace('.', '/')}/MainActivity.java", 'w', encoding='utf-8') as f:
               f.write(java_code)
           EOF
           python3 gen_code.py
